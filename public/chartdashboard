@@ -1,0 +1,256 @@
+import React, { useEffect, useState, useRef } from "react";
+import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { motion } from "framer-motion";
+import { createChart } from "lightweight-charts";
+
+export default function ChartDashboard() {
+  const [chartData, setChartData] = useState([]);
+  const [symbol, setSymbol] = useState("AAPL");
+  const [portfolio, setPortfolio] = useState([
+    "AAPL",
+    "EURUSD",
+    "TSLA",
+    "OTCMKTS:GBTC",
+  ]);
+  const [resolution, setResolution] = useState("1m");
+  const ws = useRef(null);
+  const chartContainerRef = useRef(null);
+  const chartRef = useRef(null);
+  const candleSeriesRef = useRef(null);
+  const bandSeriesRefs = useRef({});
+  const markerData = useRef([]);
+
+  useEffect(() => {
+    fetch(`/chartdata/${symbol}?resolution=${resolution}`)
+      .then((res) => res.json())
+      .then((data) => setChartData(data));
+  }, [symbol, resolution]);
+
+  useEffect(() => {
+    ws.current = new WebSocket("ws://localhost:8000/ws");
+    ws.current.onopen = () => {
+      ws.current.send(JSON.stringify({ symbols: portfolio, resolution }));
+    };
+    ws.current.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      if (message.symbol === symbol) {
+        setChartData((prev) => [...prev.slice(-200), message]);
+        if (candleSeriesRef.current) {
+          candleSeriesRef.current.update({
+            time: message.epoch || message.time,
+            open: message.open,
+            high: message.high,
+            low: message.low,
+            close: message.close,
+            color: message.trend_color,
+            borderColor: message.trend_color,
+            wickColor: message.trend_color,
+          });
+        }
+        if (bandSeriesRefs.current.upper && message.upper_band) {
+          bandSeriesRefs.current.upper.update({
+            time: message.epoch || message.time,
+            value: message.upper_band,
+          });
+        }
+        if (bandSeriesRefs.current.lower && message.lower_band) {
+          bandSeriesRefs.current.lower.update({
+            time: message.epoch || message.time,
+            value: message.lower_band,
+          });
+        }
+        if (bandSeriesRefs.current.vidya && message.vidya) {
+          bandSeriesRefs.current.vidya.update({
+            time: message.epoch || message.time,
+            value: message.vidya,
+          });
+        }
+        if (
+          candleSeriesRef.current &&
+          (message.buy_signal || message.sell_signal)
+        ) {
+          markerData.current.push({
+            time: message.epoch || message.time,
+            position: message.buy_signal ? "belowBar" : "aboveBar",
+            color: message.buy_signal ? "green" : "red",
+            shape: "arrowUp",
+            text: message.buy_signal ? "Buy" : "Sell",
+          });
+          candleSeriesRef.current.setMarkers(markerData.current);
+        }
+      }
+    };
+    return () => ws.current.close();
+  }, [portfolio, resolution, symbol]);
+
+  useEffect(() => {
+    if (!chartContainerRef.current) return;
+
+    const chart = createChart(chartContainerRef.current, {
+      width: chartContainerRef.current.clientWidth,
+      height: 400,
+      layout: {
+        background: { color: "#fff" },
+        textColor: "#000",
+      },
+      grid: {
+        vertLines: { color: "#eee" },
+        horzLines: { color: "#eee" },
+      },
+      priceScale: { position: "right" },
+      timeScale: { timeVisible: true, secondsVisible: true },
+      crossHair: { mode: 0 },
+    });
+
+    chartRef.current = chart;
+    const candleSeries = chart.addCandlestickSeries();
+    candleSeries.setData(
+      chartData.map((d) => ({
+        time: d.epoch || d.time,
+        open: d.open,
+        high: d.high,
+        low: d.low,
+        close: d.close,
+        color: d.trend_color,
+        borderColor: d.trend_color,
+        wickColor: d.trend_color,
+      }))
+    );
+    candleSeriesRef.current = candleSeries;
+
+    const markers = chartData
+      .filter((d) => d.buy_signal || d.sell_signal)
+      .map((d) => ({
+        time: d.epoch || d.time,
+        position: d.buy_signal ? "belowBar" : "aboveBar",
+        color: d.buy_signal ? "green" : "red",
+        shape: "arrowUp",
+        text: d.buy_signal ? "Buy" : "Sell",
+      }));
+    candleSeries.setMarkers(markers);
+    markerData.current = markers;
+
+    const upperBand = chart.addLineSeries({
+      color: "rgba(255,0,0,0.4)",
+      lineWidth: 1,
+    });
+    const lowerBand = chart.addLineSeries({
+      color: "rgba(0,0,255,0.4)",
+      lineWidth: 1,
+    });
+    const vidya = chart.addLineSeries({
+      color: "rgba(0,150,0,0.6)",
+      lineWidth: 1,
+    });
+
+    upperBand.setData(
+      chartData.map((d) => ({ time: d.epoch || d.time, value: d.upper_band }))
+    );
+    lowerBand.setData(
+      chartData.map((d) => ({ time: d.epoch || d.time, value: d.lower_band }))
+    );
+    vidya.setData(
+      chartData.map((d) => ({ time: d.epoch || d.time, value: d.vidya }))
+    );
+
+    bandSeriesRefs.current = { upper: upperBand, lower: lowerBand, vidya };
+
+    chart.subscribeCrosshairMove((param) => {
+      if (!param || !param.time || !param.seriesData) return;
+      const data = param.seriesData.get(candleSeries);
+      if (data) {
+        console.log("Hovered candle:", data);
+      }
+    });
+
+    return () => chart.remove();
+  }, [chartData]);
+
+  return (
+    <motion.div
+      className="p-4 grid gap-4"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.6 }}
+    >
+      <div className="flex gap-2">
+        <select
+          value={symbol}
+          onChange={(e) => setSymbol(e.target.value)}
+          className="border rounded px-2 py-1"
+        >
+          {portfolio.map((sym) => (
+            <option key={sym} value={sym}>
+              {sym}
+            </option>
+          ))}
+        </select>
+        <select
+          value={resolution}
+          onChange={(e) => setResolution(e.target.value)}
+          className="border rounded px-2 py-1"
+        >
+          <option value="30s">30s</option>
+          <option value="1m">1m</option>
+          <option value="5m">5m</option>
+          <option value="D">Daily</option>
+        </select>
+        <Button
+          onClick={() => {
+            fetch(`/chartdata/${symbol}?resolution=${resolution}`)
+              .then((res) => res.json())
+              .then((data) => setChartData(data));
+          }}
+        >
+          Refresh
+        </Button>
+      </div>
+
+      <Card>
+        <CardContent className="h-[400px]">
+          <div ref={chartContainerRef} className="w-full h-full" />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent>
+          <div className="grid grid-cols-2 gap-4 text-sm">
+            {chartData.length > 0 && (
+              <>
+                <div>
+                  <strong>Latest Close:</strong>{" "}
+                  {chartData[chartData.length - 1].close}
+                </div>
+                <div>
+                  <strong>Signal:</strong>{" "}
+                  {chartData[chartData.length - 1].buy_signal
+                    ? "Buy"
+                    : chartData[chartData.length - 1].sell_signal
+                    ? "Sell"
+                    : "Hold"}
+                </div>
+                <div>
+                  <strong>Trend:</strong>{" "}
+                  {chartData[chartData.length - 1].trend_color}
+                </div>
+                <div>
+                  <strong>VIDYA:</strong>{" "}
+                  {chartData[chartData.length - 1].vidya}
+                </div>
+                <div>
+                  <strong>Upper Band:</strong>{" "}
+                  {chartData[chartData.length - 1].upper_band}
+                </div>
+                <div>
+                  <strong>Lower Band:</strong>{" "}
+                  {chartData[chartData.length - 1].lower_band}
+                </div>
+              </>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+    </motion.div>
+  );
+}
